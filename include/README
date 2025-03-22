@@ -1,0 +1,17 @@
+# Include Directory
+
+This directory contains the header files for the Turbo Trainer project.
+
+## Files
+
+### config.h
+
+This file contains configurable parameters for the Turbo Trainer:
+
+- **Pin Definitions**: GPIO pins for the Hall sensors
+- **Serial Configuration**: Baud rate for serial communication
+- **Timing Configuration**: Intervals for measurements and output
+- **Magnets Configuration**: Number of magnets on wheel and crank
+- **Sensor Configuration**: Interrupt trigger modes
+
+You can modify these parameters to suit your specific hardware setup without changing the main code.
