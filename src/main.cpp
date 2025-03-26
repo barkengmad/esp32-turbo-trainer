@@ -1,21 +1,8 @@
 #include <Arduino.h>
 #include "config.h"
 #include <SPI.h>
-#include <SD.h>
-
-// Variables for wheel RPM calculation
-volatile unsigned long wheelPulseCount = 0;
-unsigned long wheelLastTime = 0;
-unsigned long wheelRPM = 0;
-unsigned long wheelTotalRPM = 0;
-unsigned long wheelReadingCount = 0;
-
-// Variables for cadence calculation
-volatile unsigned long cadencePulseCount = 0;
-unsigned long cadenceLastTime = 0;
-unsigned long cadenceRPM = 0;
-unsigned long cadenceTotalRPM = 0;
-unsigned long cadenceReadingCount = 0;
+#include <SdFat.h>
+#include "rpm_calculator.h"
 
 // Time tracking
 unsigned long lastOutputTime = 0;
@@ -24,35 +11,56 @@ unsigned long sessionStartTime = 0;
 
 // Session state
 bool isSessionActive = false;
-File logFile;
+bool sdCardAvailable = false;
+
+// Activity detection thresholds
+#define ACTIVITY_TIMEOUT 5000  // 5 seconds without activity before stopping logging
+#define INACTIVITY_CHECK_INTERVAL 1000  // Check for inactivity every second
+
+// Gear configuration for this specific bike (2 chainrings, 9 sprockets)
+// These values should be updated with actual tooth counts
+const uint8_t CHAINRING_COUNT = 2;
+const uint8_t CHAINRINGS[CHAINRING_COUNT] = {50, 34}; // Common road bike chainrings (front)
+
+const uint8_t SPROCKET_COUNT = 9;
+const uint8_t SPROCKETS[SPROCKET_COUNT] = {11, 12, 13, 15, 17, 19, 21, 24, 28}; // Common 9-speed cassette (rear)
+
+// Create the objects
+SdFat SD;
+FsFile logFile;
 String logFileName = "";
 
-// ISR for wheel sensor
+// ISR for wheel sensor - keep as simple as possible
 void IRAM_ATTR wheelPulseCounter() {
-  wheelPulseCount++;
+  rpmCalculator.processWheelTrigger();
 }
 
-// ISR for cadence sensor
+// ISR for cadence sensor - keep as simple as possible
 void IRAM_ATTR cadencePulseCounter() {
-  cadencePulseCount++;
+  rpmCalculator.processCadenceTrigger();
 }
 
 // Create a new log file
 bool createLogFile() {
+  if (!sdCardAvailable) {
+    Serial.println("Error: SD card not available");
+    return false;
+  }
+  
   // Generate a timestamp for the filename
   unsigned long currentTime = millis();
   logFileName = String(LOG_FILE_PREFIX) + String(currentTime) + String(LOG_FILE_EXTENSION);
   
   // Open the file for writing
-  logFile = SD.open(logFileName, FILE_WRITE);
+  logFile = SD.open(logFileName.c_str(), FILE_WRITE);
   
   if (!logFile) {
     Serial.println("Error: Could not create log file!");
     return false;
   }
   
-  // Write header row
-  logFile.println("Timestamp,ElapsedTime(ms),WheelRPM,CadenceRPM");
+  // Write header row with session averages and gear info
+  logFile.println("Timestamp,ElapsedTime(ms),WheelRPM,CadenceRPM,SessionAvgWheelRPM,SessionAvgCadenceRPM,Chainring,Sprocket,GearRatio");
   logFile.flush();
   
   Serial.print("Log file created: ");
@@ -63,75 +71,62 @@ bool createLogFile() {
 // Start a new session
 void startSession() {
   if (isSessionActive) {
-    Serial.println("Session already active!");
-    return;
+    return;  // Session already active
   }
   
-  if (createLogFile()) {
+  // Reset session averages in the calculator
+  rpmCalculator.startNewSession();
+  
+  // If SD card is available, create a log file
+  if (sdCardAvailable) {
+    if (createLogFile()) {
+      isSessionActive = true;
+      sessionStartTime = millis();
+      Serial.println("Session automatically started with logging!");
+    } else {
+      // Even if logging fails, we still track the session
+      isSessionActive = true;
+      sessionStartTime = millis();
+      Serial.println("Session started without logging (SD card error)");
+    }
+  } else {
+    // Start session without logging
     isSessionActive = true;
     sessionStartTime = millis();
-    Serial.println("Session started!");
+    Serial.println("Session started without logging (no SD card)");
   }
-}
-
-// Stop the current session
-void stopSession() {
-  if (!isSessionActive) {
-    Serial.println("No active session!");
-    return;
-  }
-  
-  // Close the log file
-  logFile.close();
-  
-  isSessionActive = false;
-  Serial.println("Session stopped!");
-  Serial.print("Data saved to: ");
-  Serial.println(logFileName);
 }
 
 // Log data to the file
 void logData(float wheelRPM, float cadenceRPM) {
-  if (!isSessionActive) return;
+  if (!isSessionActive || !sdCardAvailable) return;
   
   unsigned long currentTime = millis();
   unsigned long elapsedTime = currentTime - sessionStartTime;
   
-  // Write data to log file
-  logFile.print(currentTime);
-  logFile.print(",");
-  logFile.print(elapsedTime);
-  logFile.print(",");
-  logFile.print(wheelRPM, 1);
-  logFile.print(",");
-  logFile.println(cadenceRPM, 1);
-  
-  // Flush to ensure data is written to the card
-  logFile.flush();
-}
-
-// Process serial commands
-void processSerialCommands() {
-  if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
+  // Try to write data if possible
+  if (logFile) {
+    // Write data to log file with session averages and gear info
+    logFile.print(currentTime);
+    logFile.print(",");
+    logFile.print(elapsedTime);
+    logFile.print(",");
+    logFile.print(wheelRPM, 1);
+    logFile.print(",");
+    logFile.print(cadenceRPM, 1);
+    logFile.print(",");
+    logFile.print(rpmCalculator.getSessionAvgWheelRPM(), 1);
+    logFile.print(",");
+    logFile.print(rpmCalculator.getSessionAvgCadenceRPM(), 1);
+    logFile.print(",");
+    logFile.print(rpmCalculator.getCurrentChainring());
+    logFile.print(",");
+    logFile.print(rpmCalculator.getCurrentSprocket());
+    logFile.print(",");
+    logFile.println(rpmCalculator.getCurrentGearRatio(), 2);
     
-    if (command == "start") {
-      startSession();
-    } else if (command == "stop") {
-      stopSession();
-    } else if (command == "status") {
-      if (isSessionActive) {
-        unsigned long elapsedTime = millis() - sessionStartTime;
-        Serial.print("Session active for ");
-        Serial.print(elapsedTime / 1000);
-        Serial.println(" seconds");
-      } else {
-        Serial.println("No active session");
-      }
-    } else {
-      Serial.println("Unknown command. Available commands: start, stop, status");
-    }
+    // Flush data to SD card frequently to minimize data loss on power failure
+    logFile.flush();
   }
 }
 
@@ -139,100 +134,135 @@ void setup() {
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD_RATE);
   Serial.println("Turbo Trainer - Hall Sensor Test");
+  delay(500);
   
   // Set up Hall sensor pins as inputs with pullup resistors
   pinMode(WHEEL_SENSOR_PIN, INPUT_PULLUP);
   pinMode(CADENCE_SENSOR_PIN, INPUT_PULLUP);
   
-  // Attach interrupts for the Hall sensors
-  attachInterrupt(digitalPinToInterrupt(WHEEL_SENSOR_PIN), wheelPulseCounter, INTERRUPT_MODE);
-  attachInterrupt(digitalPinToInterrupt(CADENCE_SENSOR_PIN), cadencePulseCounter, INTERRUPT_MODE);
+  // Initialize the RPM calculator with magnet counts from config
+  rpmCalculator.begin(WHEEL_MAGNETS, CRANK_MAGNETS);
   
-  // Initialize SD card with custom pins
-  SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  Serial.print("Initializing SD card...");
-  if (!SD.begin(SD_CS_PIN)) {
-    Serial.println("SD card initialization failed!");
-  } else {
-    Serial.println("SD card initialized.");
+  // Configure the gears for this specific bike
+  rpmCalculator.configureGears(CHAINRING_COUNT, CHAINRINGS, SPROCKET_COUNT, SPROCKETS);
+  
+  // Print gear configuration
+  Serial.println("Gear Configuration:");
+  Serial.print("Chainrings: ");
+  for (uint8_t i = 0; i < CHAINRING_COUNT; i++) {
+    Serial.print(CHAINRINGS[i]);
+    if (i < CHAINRING_COUNT - 1) Serial.print(", ");
   }
+  Serial.println(" teeth");
+  
+  Serial.print("Sprockets: ");
+  for (uint8_t i = 0; i < SPROCKET_COUNT; i++) {
+    Serial.print(SPROCKETS[i]);
+    if (i < SPROCKET_COUNT - 1) Serial.print(", ");
+  }
+  Serial.println(" teeth");
   
   // Initialize timing
-  wheelLastTime = millis();
-  cadenceLastTime = millis();
   lastOutputTime = millis();
   lastLoggingTime = millis();
   
-  Serial.println("Ready! Type 'start' to begin a new session.");
+  // Try to initialize SD card
+  Serial.println("Trying to initialize SD card...");
+  delay(500);
+  
+  // Initialize SD card - separate this from critical functionality
+  Serial.print("Initializing SD card...");
+  if (!SD.begin(SD_CONFIG)) {
+    Serial.println("SD card initialization failed!");
+    // Print more detailed diagnostics
+    Serial.print("Error code: ");
+    Serial.println(SD.sdErrorCode());
+    Serial.print("Error data: ");
+    Serial.println(SD.sdErrorData());
+    sdCardAvailable = false;
+  } else {
+    Serial.println("SD card initialized successfully");
+    delay(500); // Give the card time to stabilize
+    
+    // Check SD card type - use SdFat method
+    Serial.print("SD Card present: ");
+    if (SD.card()) {
+      Serial.println("Yes");
+      sdCardAvailable = true;
+    } else {
+      Serial.println("No");
+      sdCardAvailable = false;
+    }
+  }
+  
+  // Now that other setup is done, attach interrupts last
+  // This ensures all variables are initialized before interrupts can fire
+  Serial.println("Attaching interrupt handlers...");
+  attachInterrupt(digitalPinToInterrupt(WHEEL_SENSOR_PIN), wheelPulseCounter, INTERRUPT_MODE);
+  attachInterrupt(digitalPinToInterrupt(CADENCE_SENSOR_PIN), cadencePulseCounter, INTERRUPT_MODE);
+  
+  Serial.println("Ready! Waiting for movement to start recording.");
+  if (!sdCardAvailable) {
+    Serial.println("WARNING: SD card not available. Will function without logging.");
+  }
 }
 
 void loop() {
   unsigned long currentTime = millis();
-  float avgWheelRPM = 0;
-  float avgCadenceRPM = 0;
   
-  // Calculate wheel RPM
-  if (currentTime - wheelLastTime >= MEASUREMENT_INTERVAL) {
-    // Calculate RPM: (pulses per second) * 60 / magnets
-    wheelRPM = (wheelPulseCount * 60 * 1000) / ((currentTime - wheelLastTime) * WHEEL_MAGNETS);
-    
-    // Add to total for averaging
-    wheelTotalRPM += wheelRPM;
-    wheelReadingCount++;
-    
-    // Reset counter and update time
-    wheelPulseCount = 0;
-    wheelLastTime = currentTime;
-  }
+  // Process RPM calculations 
+  rpmCalculator.calculateRPMs();
   
-  // Calculate cadence RPM
-  if (currentTime - cadenceLastTime >= MEASUREMENT_INTERVAL) {
-    // Calculate RPM: (pulses per second) * 60 / magnets
-    cadenceRPM = (cadencePulseCount * 60 * 1000) / ((currentTime - cadenceLastTime) * CRANK_MAGNETS);
-    
-    // Add to total for averaging
-    cadenceTotalRPM += cadenceRPM;
-    cadenceReadingCount++;
-    
-    // Reset counter and update time
-    cadencePulseCount = 0;
-    cadenceLastTime = currentTime;
-  }
+  // Check for timeouts
+  rpmCalculator.checkTimeouts();
   
-  // Output averaged readings every OUTPUT_INTERVAL milliseconds
+  // Handle output interval
   if (currentTime - lastOutputTime >= OUTPUT_INTERVAL) {
-    // Calculate averages
-    avgWheelRPM = wheelReadingCount > 0 ? (float)wheelTotalRPM / wheelReadingCount : 0;
-    avgCadenceRPM = cadenceReadingCount > 0 ? (float)cadenceTotalRPM / cadenceReadingCount : 0;
+    // Update session averages if session is active
+    if (isSessionActive) {
+      rpmCalculator.updateAverages();
+    }
     
-    // Output to serial
-    Serial.print("Wheel RPM: ");
-    Serial.print(avgWheelRPM, 1);
+    // Print session averages if active
+    if (isSessionActive) {
+      Serial.print("Session Avg - Wheel RPM: ");
+      Serial.print(rpmCalculator.getSessionAvgWheelRPM(), 1);
+      Serial.print(" | Cadence: ");
+      Serial.print(rpmCalculator.getSessionAvgCadenceRPM(), 1);
+      Serial.print(" RPM | ");
+    }
+    
+    // Output current values to serial
+    Serial.print("Current - Wheel RPM: ");
+    Serial.print(rpmCalculator.getCurrentWheelRPM(), 1);
     Serial.print(" | Cadence: ");
-    Serial.print(avgCadenceRPM, 1);
-    Serial.println(" RPM");
+    Serial.print(rpmCalculator.getCurrentCadenceRPM(), 1);
+    Serial.print(" RPM");
     
-    // Reset counters for next averaging period
-    wheelTotalRPM = 0;
-    wheelReadingCount = 0;
-    cadenceTotalRPM = 0;
-    cadenceReadingCount = 0;
+    // Print current gear if available
+    if (rpmCalculator.getCurrentChainring() > 0 && rpmCalculator.getCurrentSprocket() > 0) {
+      Serial.print(" | Gear: ");
+      Serial.print(rpmCalculator.getGearDescription());
+    }
+    
+    Serial.println();
+    
+    // Reset interval counters
+    rpmCalculator.resetIntervalCounters();
     
     lastOutputTime = currentTime;
   }
   
+  // Check if readings are stabilized and start session if there's activity
+  if (!isSessionActive && rpmCalculator.areReadingsStabilized(currentTime) && rpmCalculator.hasActivity()) {
+    startSession();
+  }
+  
   // Log data at the specified interval
   if (isSessionActive && currentTime - lastLoggingTime >= LOGGING_INTERVAL) {
-    // Calculate current averages for logging
-    float currentWheelRPM = wheelReadingCount > 0 ? (float)wheelTotalRPM / wheelReadingCount : 0;
-    float currentCadenceRPM = cadenceReadingCount > 0 ? (float)cadenceTotalRPM / cadenceReadingCount : 0;
-    
-    // Log the data
-    logData(currentWheelRPM, currentCadenceRPM);
+    // Log the data with current values
+    logData(rpmCalculator.getCurrentWheelRPM(), rpmCalculator.getCurrentCadenceRPM());
     
     lastLoggingTime = currentTime;
   }
-  
-  // Process any serial commands
-  processSerialCommands();
 }

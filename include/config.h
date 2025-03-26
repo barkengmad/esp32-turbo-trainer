@@ -6,10 +6,10 @@
 #define CADENCE_SENSOR_PIN 16  // GPIO pin for cadence Hall sensor
 
 // SD card module pin definitions
-#define SD_CS_PIN 17            // CS pin for SD card module
-#define SD_MOSI_PIN 18         // MOSI pin (default ESP32 VSPI)
-#define SD_MISO_PIN 21         // MISO pin (default ESP32 VSPI)
-#define SD_SCK_PIN 19         // SCK pin (default ESP32 VSPI)
+#define SD_CS_PIN 5            // CS pin for SD card module
+#define SD_MOSI_PIN 23         // MOSI pin (default ESP32 VSPI)
+#define SD_MISO_PIN 19         // MISO pin (default ESP32 VSPI)
+#define SD_SCK_PIN 18         // SCK pin (default ESP32 VSPI)
 
 // Serial configuration
 #define SERIAL_BAUD_RATE 115200
@@ -20,7 +20,7 @@
 #define LOGGING_INTERVAL 1000      // Interval for data logging in milliseconds
 
 // Magnets configuration
-#define WHEEL_MAGNETS 1  // Number of magnets on the wheel
+#define WHEEL_MAGNETS 14  // Number of magnets on the wheel
 #define CRANK_MAGNETS 1  // Number of magnets on the crank
 
 // Sensor configuration
@@ -29,5 +29,8 @@
 // Logging configuration
 #define LOG_FILE_PREFIX "/session_"  // Prefix for log files
 #define LOG_FILE_EXTENSION ".csv"    // File extension for log files
+
+// SD configuration
+#define SD_CONFIG SdSpiConfig(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(1))
 
 #endif // CONFIG_H 
