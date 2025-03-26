@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <SdFat.h>
 #include "rpm_calculator.h"
+#include "wifi_manager.h"
 
 // Time tracking
 unsigned long lastOutputTime = 0;
@@ -47,8 +48,12 @@ bool createLogFile() {
     return false;
   }
   
-  // Generate a timestamp for the filename
-  unsigned long currentTime = millis();
+  // Generate a timestamp for the filename using the current time
+  uint32_t currentTime = wifiManager.getCurrentTimestamp();
+  if (currentTime == 0) {
+    // Fallback to millis() if time sync failed
+    currentTime = millis();
+  }
   logFileName = String(LOG_FILE_PREFIX) + String(currentTime) + String(LOG_FILE_EXTENSION);
   
   // Open the file for writing
@@ -106,8 +111,14 @@ void logData(float wheelRPM, float cadenceRPM) {
   
   // Try to write data if possible
   if (logFile) {
+    // Get current timestamp
+    uint32_t timestamp = wifiManager.getCurrentTimestamp();
+    if (timestamp == 0) {
+      timestamp = currentTime; // Fallback to millis() if time sync failed
+    }
+    
     // Write data to log file with session averages and gear info
-    logFile.print(currentTime);
+    logFile.print(timestamp);
     logFile.print(",");
     logFile.print(elapsedTime);
     logFile.print(",");
@@ -128,6 +139,17 @@ void logData(float wheelRPM, float cadenceRPM) {
     // Flush data to SD card frequently to minimize data loss on power failure
     logFile.flush();
   }
+  
+  // Send data via ESP-NOW
+  SensorData data;
+  data.wheelRPM = wheelRPM;
+  data.cadenceRPM = cadenceRPM;
+  data.currentChainring = rpmCalculator.getCurrentChainring();
+  data.currentSprocket = rpmCalculator.getCurrentSprocket();
+  data.currentGearRatio = rpmCalculator.getCurrentGearRatio();
+  data.timestamp = wifiManager.getCurrentTimestamp();
+  
+  wifiManager.sendData(data);
 }
 
 void setup() {
@@ -135,6 +157,11 @@ void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
   Serial.println("Turbo Trainer - Hall Sensor Test");
   delay(500);
+  
+  // Initialize Wi-Fi and time sync
+  if (!wifiManager.begin()) {
+    Serial.println("Failed to initialize Wi-Fi and time sync");
+  }
   
   // Set up Hall sensor pins as inputs with pullup resistors
   pinMode(WHEEL_SENSOR_PIN, INPUT_PULLUP);
@@ -201,6 +228,9 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(WHEEL_SENSOR_PIN), wheelPulseCounter, INTERRUPT_MODE);
   attachInterrupt(digitalPinToInterrupt(CADENCE_SENSOR_PIN), cadencePulseCounter, INTERRUPT_MODE);
   
+  // Disconnect from Wi-Fi after time sync
+  wifiManager.disconnectWiFi();
+  
   Serial.println("Ready! Waiting for movement to start recording.");
   if (!sdCardAvailable) {
     Serial.println("WARNING: SD card not available. Will function without logging.");
@@ -241,8 +271,15 @@ void loop() {
     
     // Print current gear if available
     if (rpmCalculator.getCurrentChainring() > 0 && rpmCalculator.getCurrentSprocket() > 0) {
-      Serial.print(" | Gear: ");
-      Serial.print(rpmCalculator.getGearDescription());
+      Serial.print(" | Chainring ");
+      Serial.print(rpmCalculator.getCurrentChainring());
+      Serial.print(" (");
+      Serial.print(CHAINRINGS[rpmCalculator.getCurrentChainring() - 1]);
+      Serial.print(") : Sprocket ");
+      Serial.print(rpmCalculator.getCurrentSprocket());
+      Serial.print(" (");
+      Serial.print(SPROCKETS[rpmCalculator.getCurrentSprocket() - 1]);
+      Serial.print(")");
     }
     
     Serial.println();
